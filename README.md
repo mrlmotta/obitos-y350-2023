@@ -1,0 +1,2 @@
+Este documento apresenta uma análise descritiva e uma análise de regressão dos óbitos decorrentes de intervenção legal registrados no Brasil em 2023, utilizando dados do Sistema de Informações sobre Mortalidade (SIM) do DataSUS. O objetivo é investigar a associação entre raça e a probabilidade de um óbito ser decorrente de intervenção legal (Código Y350 da CID-10), controlando por outras variáveis demográficas como sexo, faixa etária, escolaridade, estado civil e município de ocorrência.
+
