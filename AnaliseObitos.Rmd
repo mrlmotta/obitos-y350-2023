@@ -1,0 +1,384 @@
+---
+title: "Características Demográficas dos Óbitos Decorrentes de Intervenção Legal no Brasil (2023)"
+author: "Murilo Motta, Universidade de São Paulo"
+output:
+  html_document:
+    latex_engine: xelatex 
+    number_sections: true
+    toc: true
+fontsize: 12pt
+geometry: "left=3cm,right=3cm,top=2.5cm,bottom=2.5cm"
+header-includes:
+  - \usepackage{caption}
+  - \usepackage{longtable}
+  - \captionsetup[table]{labelformat=empty}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, message = F, warning = F, fig.pos = 'H')
+
+#Este chunk instala os pacotes necessários para as análises.
+
+# Função para instalar e carregar pacotes do CRAN
+if_required_install_cran <- function(pkg) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Função para instalar e carregar pacotes do GitHub
+if_required_install_github <- function(pkg_name, repo_name, subdir = NULL) {
+  if (!require(pkg_name, character.only = TRUE)) {
+    if (!requireNamespace("remotes", quietly = TRUE)) {
+      install.packages("remotes")
+    }
+    if (!requireNamespace("devtools", quietly = TRUE)) {
+      install.packages("devtools")
+    }
+    if (is.null(subdir)) {
+      remotes::install_github(repo_name, force = TRUE)
+    } else {
+      remotes::install_github(repo_name, subdir = subdir, force = TRUE)
+    }
+    library(pkg_name, character.only = TRUE)
+  }
+}
+
+# Instalação e carregamento de pacotes CRAN
+packages_cran <- c("broom", "tidyverse", "data.table", "lubridate", "dplyr", "ggplot2", "stringr", "sandwich", "lmtest", "gtsummary")
+sapply(packages_cran, if_required_install_cran)
+
+# Instalação e carregamento de pacotes do GitHub
+if_required_install_github("read.dbc", "danicat/read.dbc")
+if_required_install_github("microdatasus", "rfsaldanha/microdatasus")
+if_required_install_github("geobr", "ipeaGIT/geobr", subdir = "r-package")
+```
+
+```{r dataloading, results='hide'}
+# Este chunk realiza a importação e o pré-processamento dos dados do DataSUS e combina com informações geográficas do geobr. 
+
+# Importa os dados do SIM-DO para 2023
+dados_brutos <- fetch_datasus(year_start = 2023, year_end = 2023,
+                              information_system = 'SIM-DO',
+                              vars = c("TIPOBITO", "DTOBITO", "DTNASC", "SEXO", "RACACOR", "ESTCIV",
+                                       "ESC", "ESC2010", "CODMUNOCOR", "CAUSABAS"),
+                              uf='all')
+
+# Filtra somente tipo de óbito não fetal
+dados_filtrados <- dados_brutos %>% 
+  filter(TIPOBITO == 2)
+
+# Processa os dados e cria variáveis de interesse
+dados <- process_sim(data = dados_filtrados) %>%
+  mutate(
+    DTOBITO = ymd(DTOBITO),
+    DTNASC = ymd(DTNASC),
+    ANOOBITO = year(DTOBITO),
+    ANONASC = year(DTNASC),
+    MESOBITO = month(DTOBITO),
+    IDADE = ANOOBITO - ANONASC,
+    
+    # Variável dependente binária: 1 se CAUSABAS é Y350, 0 caso contrário
+    Morte_Intervencao_Legal = ifelse(CAUSABAS == "Y350", 1, 0)
+  ) %>%
+  select(-DTNASC, -ANONASC)
+
+# Carrega a malha dos municípios do geobr 
+municipios <- read_municipality(year = 2024,
+                                showProgress = FALSE) %>%
+  mutate(
+    cod_6 = str_sub(as.character(code_muni), 1, 6), #Remove o último dígito do 'code_muni' para compatibilidade
+    cod_6 = as.numeric(cod_6)
+  ) 
+
+# Realiza a junção dos dados de óbitos com as informações geográficas
+dados_geo <- dados %>%
+  mutate(CODMUNOCOR = as.numeric(as.character(CODMUNOCOR))) %>%
+  left_join(
+    municipios,
+    by = c("CODMUNOCOR" = "cod_6")
+  ) %>%
+  rename(
+    UF = abbrev_state,
+    MUNI = name_muni
+  )
+```
+
+# Introdução
+
+Este documento apresenta uma análise descritiva e uma análise de regressão dos óbitos decorrentes de intervenção legal registrados no Brasil em 2023, utilizando dados do Sistema de Informações sobre Mortalidade (SIM) do DataSUS. 
+
+O objetivo é investigar a associação entre raça e a probabilidade de um óbito ser decorrente de intervenção legal (Código Y350 da CID-10), controlando por outras variáveis demográficas como sexo, faixa etária, escolaridade, estado civil e município de ocorrência.
+
+
+# Análise Descritiva
+
+Em 2023, foram registrados 1.960 óbitos decorrentes de intervenção legal (Y350), de um total de 1.465.610 óbitos não fetais.  Uma análise das características demográficas desses óbitos revela distinções entre aqueles decorrentes de intervenção legal e outros tipos de óbitos não fetais.
+
+A população parda correspondeu a 70% das vítimas de intervenção legal, uma proporção significativamente maior em comparação aos 39% observados nos demais óbitos não fetais.
+
+Homens representaram quase a totalidade (99%) dos óbitos por intervenção legal, em comparação a 55% nos outros tipos de óbitos não fetais.
+
+Em relação à faixa etária, indivíduos entre 18 e 29 anos foram os mais afetados por intervenção legal (65% dos casos), enquanto essa faixa etária representou apenas 3,7% dos demais óbitos não fetais.
+
+Em relação à escolaridade, a faixa de 4 a 7 anos de estudo foi a mais comum entre os óbitos por intervenção legal (48%),em comparação a 28% em outras causas de óbitos não fetais.
+
+Além disso, a grande maioria das vítimas de óbitos por intervenção legal era solteira (91%), um perfil que difere dos 29% observados em outros tipos de óbitos não fetais.
+
+```{r summary}
+# Prepara dados para tabela
+dados_tabela <- dados %>%
+  mutate(
+    Morte_Intervencao_Legal = factor(Morte_Intervencao_Legal,
+                                     levels = c(1, 0),
+                                     labels = c("Y350", "Outros")),
+    RACACOR = factor(RACACOR),
+    
+    SEXO = factor(SEXO),
+    
+    Faixa_Etaria = case_when(
+       IDADE < 18 ~ "0-17 anos",
+       IDADE >= 18 & IDADE <= 29 ~ "18-29 anos",
+       IDADE >= 30 & IDADE <= 59 ~ "30-59 anos",
+       IDADE >= 60 ~ "60+ anos"
+       ) %>% factor(levels = c("0-17 anos", "18-29 anos", "30-59 anos", "60+ anos")),
+
+    ESC = factor(ESC,
+                 levels = c("Nenhuma", "1 a 3 anos", "4 a 7 anos", "8 a 11 anos", "12 anos ou mais"),
+                 labels = c("Nenhuma", "1 a 3 anos", "4 a 7 anos", "8 a 11 anos", "12 anos ou mais")),
+    ESTCIV = factor(ESTCIV,
+                    levels = c("Solteiro", "Casado", "União consensual", "Separado judicialmente", "Viúvo"),
+                    labels = c("Solteiro", "Casado", "União consensual", "Separado judicialmente", "Viúvo"))
+  )
+
+formula_modelo <- Morte_Intervencao_Legal ~ RACACOR + SEXO + ESC + ESTCIV
+
+# Gera a tabela
+tabela <- dados_tabela %>%  
+  select(Morte_Intervencao_Legal, RACACOR, SEXO, Faixa_Etaria, ESC, ESTCIV) %>%
+tbl_summary(
+    by = Morte_Intervencao_Legal,
+    statistic = list(all_categorical() ~ "{n} ({p}%)"),
+    label = list(
+      RACACOR = "Raça",
+      SEXO = "Sexo",
+      Faixa_Etaria = "Faixa Etária",
+      ESC = "Escolaridade",
+      ESTCIV = "Estado Civil"
+    ),
+    missing = "always"
+  ) %>%
+  modify_header(
+    list(
+      stat_1 ~ "**Y350**",
+      stat_2 ~ "**Outros Óbitos Não Fetais**",
+       label ~ "**Variáveis**"
+    )
+  ) %>%
+  modify_caption("**Características Demográficas dos Óbitos por Intervenção Legal (Y350) e Outros Óbitos Não Fetais no Brasil (2023)**") %>% 
+  bold_labels()
+
+
+tabela
+```
+
+Seis Estados registraram mais de 100 óbitos decorrentes de intervenção legal em 2023: Bahia (790), Paraná (236), Rio de Janeiro (176), Goiás (160), Amapá (130) e São Paulo (105).
+
+```{r mapping}
+# Agrega os dados de óbitos por Estado
+dados_mapa_uf <- dados_geo %>%
+  group_by(UF) %>%
+  summarise(
+    contagem_intervencao_legal = sum(Morte_Intervencao_Legal, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# Carrega a malha dos estados do geobr
+estados <- read_state(year = 2020)
+
+# Junta os dados agregados com a malha dos estados do geobr
+dados_intervencao_uf <- estados %>%
+  left_join(dados_mapa_uf, by = c("abbrev_state" = "UF"))
+
+# Mapa do volume de óbitos por Intervenção Legal por Estado
+ggplot() +
+  geom_sf(data = dados_intervencao_uf, aes(fill = contagem_intervencao_legal), color = "black", linewidth = 0.1) +
+  scale_fill_viridis_c(option = "rocket", name = "Nº de Óbitos Y350",
+                       n.breaks = 7) + 
+  labs(
+    title = "Óbitos por Intervenção Legal (Y350) por Estado (2023)",
+  ) +
+  theme_minimal()
+```
+
+Na Bahia, os óbitos se concentraram na capital, Salvador.
+
+```{r mapping_bahia}
+# Agrega os dados de óbitos por cidade
+dados_mapa_cid <- dados_geo %>%
+  filter(UF == "BA") %>% 
+  group_by(CODMUNOCOR) %>%
+  summarise(
+    contagem_intervencao_legal = sum(Morte_Intervencao_Legal, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# Carrega a malha da Bahia
+municipios_bahia <- read_municipality(year = 2024,
+                                             code_muni = "BA", 
+                                             showProgress = FALSE) %>%
+                    mutate(
+                    cod_6 = as.numeric(stringr::str_sub(as.character(code_muni), 1, 6)))
+
+# Junta os dados agregados com a malha de cidades do geobr
+dados_intervencao_cid <- municipios_bahia %>%
+  left_join(dados_mapa_cid, by = c("cod_6" = "CODMUNOCOR"))
+
+# Mapa do volume de óbitos por Intervenção Legal por Cidade na Bahia
+ggplot() +
+  geom_sf(data = dados_intervencao_cid, aes(fill = contagem_intervencao_legal), color = "black", linewidth = 0.1) +
+  scale_fill_viridis_c(option = "rocket", name = "Nº de Óbitos Y350",
+                       n.breaks = 5) + 
+  labs(
+    title = "Óbitos por Intervenção Legal (Y350) na Bahia (2023)",
+  ) +
+  theme_minimal()
+```
+
+Nas 10 cidades com maior volume de óbitos decorrentes de intervenção legal, pessoas não-brancas foram desproporcionalmente vitimadas em comparação a pessoas brancas em 2023. 
+
+```{r tencities}
+# Identifica os 10 municípios com maior número de óbitos por intervenção legal
+top_10_muni <- dados_geo %>%
+  filter(Morte_Intervencao_Legal == 1) %>%
+  group_by(CODMUNOCOR, MUNI, UF) %>%
+  summarise(Total_Intervencao = n(), .groups = 'drop') %>%
+  arrange(desc(Total_Intervencao)) %>% 
+  head(10) 
+
+# Prepara os dados para o gráfico de barras empilhadas por cidade
+dados_cidade_composicao <- dados_geo %>%
+  filter(CODMUNOCOR %in% top_10_muni$CODMUNOCOR) %>% 
+  filter(Morte_Intervencao_Legal == 1) %>% 
+  mutate(
+    Nome_Cidade_UF = paste(MUNI, "-", UF),
+     Raca_Nao_Branca = case_when(
+      RACACOR == "Branca" ~ "Branca",
+      TRUE ~ "Não-Branca")
+  ) %>%
+  group_by(Nome_Cidade_UF, Raca_Nao_Branca) %>% 
+  summarise(Numero_Casos = n(), .groups = 'drop') %>% 
+  left_join(top_10_muni %>% select(Nome_Cidade_UF = MUNI, Total_Intervencao), by = "Nome_Cidade_UF") %>%
+  group_by(Nome_Cidade_UF) %>%
+  mutate(Total_Cidade_Intervencao = sum(Numero_Casos)) %>%
+  ungroup()
+
+# Gráfico de Barras Empilhadas
+ggplot(dados_cidade_composicao, aes(x = reorder(Nome_Cidade_UF, Total_Cidade_Intervencao),
+                                    y = Numero_Casos,
+                                    fill = Raca_Nao_Branca)) +
+  geom_bar(stat = "identity", position = "stack", color = "black") +
+  labs(title = "Composição Racial dos Óbitos por Intervenção Legal",
+       subtitle = "Nas 10 Cidades com Mais Casos (Brasil, 2023)",
+       x = NULL,
+       y = "Número de Óbitos por Intervenção Legal",
+       fill = "Grupo Racial") +
+  theme_minimal() +
+    coord_flip()
+```
+
+# Análise de Regressão
+
+A análise descritiva indica a existência de um padrão de vitimização racialmente desigual nos óbitos decorrentes por intervenção legal no Brasil em 2023. Para investigar essa relação, utilizei um modelo de regressão logística para estimar o efeito da raça de um indivíduo na probabilidade de o óbito ser decorrente de intervenção legal, controlando por medidas binárias de sexo, faixa etária, escolaridade, estado civil e município de ocorrência. 
+
+Devido à desproporção de classes no conjunto de dados original (1.960 óbitos por intervenção legal em um universo de 1.465.610 óbitos não fetais), realizei uma amostragem aleatória de 2.000 casos de óbitos não relacionados a intervenção legal para balancear a análise. Então, as observações com dados ausentes foram removidas, resultando em 3.297 observações.
+
+Os resultados indicam que a chance de um óbito ser decorrente de intervenção legal foi 1,93 vezes maior para indivíduos não brancos do que para indivíduos brancos (p<0,001) no Brasil em 2023.
+
+```{r preparring}
+# Balanceando o dataset, aleatoriamente selecionando 2000 casos não tratados
+treat <- dados_geo %>% filter(Morte_Intervencao_Legal == 1)
+non_treat <- dados_geo %>% filter(Morte_Intervencao_Legal == 0)
+set.seed(123)
+sample_non_treat <- non_treat %>% sample_n(2000, replace = FALSE)
+
+dados_sampled <- bind_rows(treat, sample_non_treat)
+
+# Preparando dados para o modelo
+dados_modelo <- dados_sampled %>%
+  filter(
+    !is.na(RACACOR),
+    !is.na(SEXO),
+    !is.na(IDADE),
+    !is.na(ESC),
+    !is.na(ESTCIV)
+  ) %>%
+  mutate(
+    Morte_Intervencao_Legal = factor(Morte_Intervencao_Legal, levels = c(0, 1), labels = c("Outros", "Y350")),
+    Morte_Intervencao_Legal = relevel(Morte_Intervencao_Legal, ref = "Outros"),
+
+    Raca_Nao_Branca = case_when(
+      RACACOR == "Branca" ~ "Branca",
+      TRUE ~ "Não Branca"
+    ) %>% factor(levels = c("Não Branca", "Branca")), 
+    Raca_Nao_Branca = relevel(Raca_Nao_Branca, ref = "Branca"),
+
+    SEXO_Masc = factor(SEXO, levels = c("Feminino", "Masculino")),
+    SEXO_Masc = relevel(SEXO_Masc, ref = "Feminino"),
+    
+    Jovem = case_when(IDADE >= 18 & IDADE <= 29 ~ "Jovem",
+      TRUE ~ "Não Jovem"
+    ) %>% factor(levels = c("Não Jovem", "Jovem")), 
+    Jovem = relevel(Jovem, ref = "Não Jovem"),
+
+    ESC_Baixa = case_when(
+      ESC == "12 anos ou mais" ~ "Alta",
+      TRUE ~ "Baixa"
+    ) %>% factor(levels = c("Alta", "Baixa")),
+    ESC_Baixa = relevel(ESC_Baixa, ref = "Alta"),
+
+    ESTCIV_Solt = case_when(
+      ESTCIV == "Solteiro" ~ "Solteiro",
+      TRUE ~ "Não Solteiro"
+    ) %>% factor(levels = c("Não Solteiro", "Solteiro")),
+    ESTCIV_Solt = relevel(ESTCIV_Solt, ref = "Não Solteiro"),
+    
+     SSA = case_when(
+      CODMUNOCOR == "292740" ~ "Salvador (BA)",
+      TRUE ~ "Outros"
+    ) %>% factor(levels = c("Outros", "Salvador (BA)")),
+    SSA = relevel(SSA, ref = "Outros"),
+  )
+```
+
+```{r regressing}
+# Modelo
+modelo <- glm(Morte_Intervencao_Legal ~ Raca_Nao_Branca + SEXO_Masc + Jovem + ESC_Baixa + ESTCIV_Solt + SSA,
+              family = binomial(link = "logit"),
+              data = dados_modelo)
+
+# Tabela gtsummary
+tabela_reg <- modelo %>%
+  tbl_regression(
+    exponentiate = TRUE, 
+    label = list(
+      Raca_Nao_Branca ~ "Raça", 
+      SEXO_Masc ~ "Sexo",
+      Jovem ~ "Faixa Etária",
+      ESC_Baixa ~ "Escolaridade",   
+      ESTCIV_Solt ~ "Estado Civil",
+      SSA ~ "Município da Ocorrência"
+    ),
+    estimate_fun = ~ style_sigfig(.x, digits = 3),
+    pvalue_fun = ~ style_pvalue(.x, digits = 3),
+    conf.level = 0.95
+  ) %>%
+  add_glance_source_note(
+    include = c(nobs, logLik),
+    label = list(nobs = "N Obs.", logLik = "Log-likelihood")
+  ) %>%
+  modify_caption("**Resultados da Regressão Logística**")
+
+tabela_reg
+```
